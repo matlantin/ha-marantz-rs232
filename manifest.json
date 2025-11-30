@@ -1,0 +1,12 @@
+{
+  "domain": "marantz_rs232",
+  "name": "Marantz RS232 MediaPlayer",
+  "version": "0.1.0",
+  "documentation": "https://example.local/marantz_rs232",
+  "requirements": [
+    "pyserial>=3.0",
+    "PyYAML>=5.3"
+  ],
+  "dependencies": [],
+  "codeowners": ["@your-github-id"]
+}

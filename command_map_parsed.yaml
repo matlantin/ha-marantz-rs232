@@ -1,0 +1,42 @@
+# Example command_map parsed from SR8001 RS232 spec (use with start char '@' and CR)
+power_on: "@PWR:2"
+power_off: "@PWR:1"
+power_toggle: "@PWR:0"
+
+# Volume
+volume_up: "@VOL:1"
+volume_down: "@VOL:2"
+# Set absolute volume: use three-digit value (e.g. 000 for 0.0dB, see spec)
+volume_set_template: "@VOL:{value:03d}"
+
+# Mute
+mute_on: "@AMT:2"   # Audio mute ON
+mute_off: "@AMT:1"  # Audio mute OFF
+video_mute_on: "@VMT:2"
+video_mute_off: "@VMT:1"
+
+# Source selection (common mappings found in spec)
+sources:
+  TV: "SRC:1"
+  Squeezebox: "SRC:2"
+  LG TV: "SRC:3"
+  DSS_VCR2: "SRC:5"
+  AUX1: "SRC:9"
+  AUX2: "SRC:A"
+  CD: "SRC:C"
+  TAPE: "SRC:E"
+  TUNER1: "SRC:F"
+  FM1: "SRC:G"
+  AM1: "SRC:H"
+  XM1: "SRC:J"
+  HDMI1: "HDM:1"
+  HDMI2: "HDM:2"
+
+# Query/status commands (use '?' as parameter per spec)
+query_power: "@PWR:?"
+query_volume: "@VOL:?"
+query_source: "@SRC:?"
+
+# Notes:
+# - Commands must be prefixed with the Start character '@' and terminated with CR (0x0D).
+# - Replies from the unit use ACK (0x06) / NAK (0x15) or a Status answer; parse accordingly.
