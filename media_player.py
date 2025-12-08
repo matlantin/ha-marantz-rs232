@@ -297,6 +297,22 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
 
 
 class MarantzRS6001(MediaPlayerEntity):
+
+    async def async_mute_volume(self, mute: bool) -> None:
+        """Active ou désactive le mute sur l'ampli."""
+        cmd = None
+        if mute:
+            cmd = self._cmd.get("mute_on")
+        else:
+            cmd = self._cmd.get("mute_off")
+        if not cmd:
+            _LOGGER.warning("Aucune commande mute_on/mute_off définie dans command_map")
+            return
+        await self._write_opportunistic(cmd)
+        # Mise à jour optimistic : affiche l'état mute immédiatement
+        self._muted = mute
+        self.async_write_ha_state()
+
     """Media player entity for a Marantz SR6001 (RS232).
 
     This entity envoie les commandes définies dans `command_map`. Le mapping est
