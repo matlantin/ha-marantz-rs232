@@ -289,13 +289,23 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
     hass.services.async_register(DOMAIN, "send_raw", handle_send_raw, schema=schema)
 
 
+
 class MarantzRS6001(MediaPlayerEntity):
     """Media player entity for a Marantz SR6001 (RS232).
 
-    This entity sends commands defined in `command_map`. The mapping is
-    intentionally user-provided because exact RS232 strings depend on
-    firmware/format. See README for examples and how to fill the map.
+    This entity envoie les commandes définies dans `command_map`. Le mapping est
+    volontairement fourni par l'utilisateur car les chaînes RS232 exactes dépendent du firmware/format.
+    Voir le README pour des exemples et comment remplir la map.
     """
+
+    @property
+    def extra_state_attributes(self):
+        """Expose les attributs supplémentaires pour Home Assistant."""
+        attrs = {}
+        db = self.volume_db
+        if db is not None:
+            attrs["volume_db"] = db
+        return attrs
 
     def __init__(self, device: SerialDevice, name: str, command_map: dict, optimistic: bool = False, parsed_yaml_path: Optional[Path] = None, use_marantzusb_format: bool = False):
         self._device = device
@@ -372,6 +382,13 @@ class MarantzRS6001(MediaPlayerEntity):
     @property
     def volume_level(self):
         return self._volume_level
+
+    @property
+    def volume_db(self):
+        """Retourne la valeur du volume en dB exacte renvoyée par l'ampli (si disponible)."""
+        if hasattr(self, '_volume_db_exact') and self._volume_db_exact is not None:
+            return self._volume_db_exact
+        return None
 
     @property
     def is_volume_muted(self):
@@ -826,11 +843,14 @@ class MarantzRS6001(MediaPlayerEntity):
                                     db = int(sval) / 10.0
                                 else:
                                     db = float(sval)
-                                db = max(-80.0, min(18.0, db))
-                                self._volume_level = (db - (-80.0)) / (18.0 - (-80.0))
+                                # Stocke la valeur brute exacte
+                                self._volume_db_exact = db
+                                # Conversion pour le slider (adapter la plage si besoin)
+                                self._volume_level = (db - (-72.0)) / (15.0 - (-72.0))
+                                self._volume_level = max(0.0, min(1.0, self._volume_level))
                                 _LOGGER.debug("Parsed volume dB=%s -> level=%s", db, self._volume_level)
                             except Exception:
-                                pass
+                                self._volume_db_exact = None
 
                 # QUERY SOURCE
                 if "query_source" in self._cmd:
