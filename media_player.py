@@ -114,56 +114,62 @@ class SerialDevice:
             self._serial.close()
 
     def write_raw(self, raw: str) -> None:
-        self.open()
-        # Ensure start character '@' is present per spec
-        if not raw.startswith("@"):
-            raw = "@" + raw
-        payload = raw.encode("ascii", errors="ignore") + self.newline.encode()
-        # Debug: log exact command and payload sent to the serial port
-        _LOGGER.debug("SerialDevice.write_raw: port=%s command=%s payload=%s", self.port, raw, payload)
-        self._serial.write(payload)
-        # small delay to let the device process
-        time.sleep(0.08)
+        try:
+            self.open()
+            # Ensure start character '@' is present per spec
+            if not raw.startswith("@"):
+                raw = "@" + raw
+            payload = raw.encode("ascii", errors="ignore") + self.newline.encode()
+            _LOGGER.debug("SerialDevice.write_raw: port=%s command=%s payload=%s", self.port, raw, payload)
+            self._serial.write(payload)
+            time.sleep(0.08)
+        except Exception as exc:
+            _LOGGER.error("Erreur lors de l'envoi sur le port série: %s. Tentative de reconnexion...", exc)
+            try:
+                self.close()
+                self.open()
+                self._serial.write(payload)
+                time.sleep(0.08)
+            except Exception as exc2:
+                _LOGGER.error("Echec de la reconnexion série: %s", exc2)
 
     def query(self, raw: str) -> str:
         """Send a command and return the raw response as text."""
-        self.open()
-        self._serial.reset_input_buffer()
-        payload = raw.encode("ascii", errors="ignore") + self.newline.encode()
-        self._serial.write(payload)
-        # Give device a bit more time to respond
-        time.sleep(0.12)
-
-        # Read until terminator (CR) or until timeout; aggregate multiple lines
-        end_time = time.time() + 0.5
-        buf = bytearray()
         try:
+            self.open()
+            self._serial.reset_input_buffer()
+            payload = raw.encode("ascii", errors="ignore") + self.newline.encode()
+            self._serial.write(payload)
+            time.sleep(0.12)
+
+            end_time = time.time() + 0.5
+            buf = bytearray()
             while time.time() < end_time:
-                # Read until CR (self.newline) or timeout
-                chunk = self._serial.read_until(self.newline.encode(), size=1024)
+                try:
+                    chunk = self._serial.read_until(self.newline.encode(), size=1024)
+                except Exception as exc:
+                    _LOGGER.error("Erreur lecture série: %s. Tentative de reconnexion...", exc)
+                    self.close()
+                    self.open()
+                    continue
                 if chunk:
                     buf.extend(chunk)
-                    # small pause to allow additional bytes to arrive
                     time.sleep(0.02)
-                    # continue loop to gather any further fragments
                     continue
-                # no chunk available, break early
                 break
-        except serial.SerialException:
+            if not buf:
+                return ""
+            try:
+                text = buf.decode("ascii", errors="ignore")
+            except Exception:
+                return ""
+            text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+            _LOGGER.debug("SerialDevice.query: port=%s cmd=%s raw_response=%s", self.port, raw, repr(text))
+            return text
+        except Exception as exc:
+            _LOGGER.error("Erreur globale query série: %s", exc)
+            self.close()
             return ""
-
-        if not buf:
-            return ""
-
-        try:
-            text = buf.decode("ascii", errors="ignore")
-        except Exception:
-            return ""
-
-        # Normalize line endings and strip whitespace
-        text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
-        _LOGGER.debug("SerialDevice.query: port=%s cmd=%s raw_response=%s", self.port, raw, repr(text))
-        return text
 
 
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
