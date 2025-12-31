@@ -14,6 +14,7 @@ Notes for the user:
 import asyncio
 import logging
 import time
+import threading
 from typing import Optional
 
 import serial
@@ -97,79 +98,205 @@ class SerialDevice:
     """Simple blocking serial helper (used in executor).
 
     It opens the port on demand and provides `write_raw` and `query`.
+    Includes robust timeout handling and automatic reconnection.
     """
+
+    # Timeout global pour éviter les blocages indéfinis
+    OPERATION_TIMEOUT = 3.0  # secondes
+    MAX_RECONNECT_ATTEMPTS = 2
 
     def __init__(self, port: str, baudrate: int, newline: str = "\r"):
         self.port = port
         self.baudrate = baudrate
         self.newline = newline
         self._serial: Optional[serial.Serial] = None
+        self._lock = threading.Lock()  # Protège les opérations série
+        self._consecutive_errors = 0
+        self._last_successful_op = time.time()
 
-    def open(self):
-        if self._serial is None or not self._serial.is_open:
-            self._serial = serial.Serial(self.port, self.baudrate, timeout=1)
+    def open(self) -> bool:
+        """Open serial port with timeout protection. Returns True if successful."""
+        try:
+            if self._serial is not None and self._serial.is_open:
+                return True
+            # Fermer proprement si dans un état incohérent
+            if self._serial is not None:
+                try:
+                    self._serial.close()
+                except Exception:
+                    pass
+                self._serial = None
+            # Ouvrir avec un timeout de lecture court
+            self._serial = serial.Serial(
+                self.port, 
+                self.baudrate, 
+                timeout=0.5,  # Timeout lecture court
+                write_timeout=1.0  # Timeout écriture
+            )
+            self._consecutive_errors = 0
+            _LOGGER.debug("Port série %s ouvert avec succès", self.port)
+            return True
+        except Exception as exc:
+            _LOGGER.error("Impossible d'ouvrir le port série %s: %s", self.port, exc)
+            self._serial = None
+            return False
 
     def close(self):
-        if self._serial and self._serial.is_open:
-            self._serial.close()
-
-    def write_raw(self, raw: str) -> None:
+        """Close serial port safely."""
         try:
-            self.open()
+            if self._serial is not None:
+                if self._serial.is_open:
+                    self._serial.close()
+                self._serial = None
+        except Exception as exc:
+            _LOGGER.debug("Erreur lors de la fermeture du port série: %s", exc)
+            self._serial = None
+
+    def _reset_port(self) -> bool:
+        """Force reset du port série. Returns True if successful."""
+        _LOGGER.warning("Reset du port série %s...", self.port)
+        self.close()
+        time.sleep(0.1)
+        return self.open()
+
+    def write_raw(self, raw: str, timeout: float = None) -> bool:
+        """Write command to serial port with timeout protection. Returns True if successful."""
+        if timeout is None:
+            timeout = self.OPERATION_TIMEOUT
+        
+        if not self._lock.acquire(timeout=timeout):
+            _LOGGER.warning("write_raw: impossible d'acquérir le verrou (timeout)")
+            return False
+        
+        try:
+            start_time = time.time()
+            
             # Ensure start character '@' is present per spec
             if not raw.startswith("@"):
                 raw = "@" + raw
             payload = raw.encode("ascii", errors="ignore") + self.newline.encode()
-            _LOGGER.debug("SerialDevice.write_raw: port=%s command=%s payload=%s", self.port, raw, payload)
-            self._serial.write(payload)
-            time.sleep(0.08)
-        except Exception as exc:
-            _LOGGER.error("Erreur lors de l'envoi sur le port série: %s. Tentative de reconnexion...", exc)
-            try:
-                self.close()
-                self.open()
-                self._serial.write(payload)
-                time.sleep(0.08)
-            except Exception as exc2:
-                _LOGGER.error("Echec de la reconnexion série: %s", exc2)
-
-    def query(self, raw: str) -> str:
-        """Send a command and return the raw response as text."""
-        try:
-            self.open()
-            self._serial.reset_input_buffer()
-            payload = raw.encode("ascii", errors="ignore") + self.newline.encode()
-            self._serial.write(payload)
-            time.sleep(0.12)
-
-            end_time = time.time() + 0.5
-            buf = bytearray()
-            while time.time() < end_time:
+            
+            for attempt in range(self.MAX_RECONNECT_ATTEMPTS):
+                if time.time() - start_time > timeout:
+                    _LOGGER.error("write_raw: timeout global dépassé")
+                    return False
+                
+                if not self.open():
+                    time.sleep(0.1)
+                    continue
+                
                 try:
-                    chunk = self._serial.read_until(self.newline.encode(), size=1024)
+                    _LOGGER.debug("SerialDevice.write_raw: port=%s command=%s", self.port, raw)
+                    self._serial.write(payload)
+                    self._serial.flush()  # S'assurer que les données sont envoyées
+                    time.sleep(0.08)
+                    self._consecutive_errors = 0
+                    self._last_successful_op = time.time()
+                    return True
+                except serial.SerialTimeoutException:
+                    _LOGGER.warning("write_raw: timeout écriture, tentative %d/%d", attempt + 1, self.MAX_RECONNECT_ATTEMPTS)
+                    self._reset_port()
                 except Exception as exc:
-                    _LOGGER.error("Erreur lecture série: %s. Tentative de reconnexion...", exc)
-                    self.close()
-                    self.open()
-                    continue
-                if chunk:
-                    buf.extend(chunk)
-                    time.sleep(0.02)
-                    continue
-                break
-            if not buf:
-                return ""
-            try:
-                text = buf.decode("ascii", errors="ignore")
-            except Exception:
-                return ""
-            text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
-            _LOGGER.debug("SerialDevice.query: port=%s cmd=%s raw_response=%s", self.port, raw, repr(text))
-            return text
-        except Exception as exc:
-            _LOGGER.error("Erreur globale query série: %s", exc)
-            self.close()
+                    _LOGGER.error("write_raw erreur: %s, tentative %d/%d", exc, attempt + 1, self.MAX_RECONNECT_ATTEMPTS)
+                    self._consecutive_errors += 1
+                    self._reset_port()
+            
+            _LOGGER.error("write_raw: échec après %d tentatives", self.MAX_RECONNECT_ATTEMPTS)
+            return False
+        finally:
+            self._lock.release()
+
+    def query(self, raw: str, timeout: float = None) -> str:
+        """Send a command and return the raw response as text with timeout protection."""
+        if timeout is None:
+            timeout = self.OPERATION_TIMEOUT
+        
+        if not self._lock.acquire(timeout=timeout):
+            _LOGGER.warning("query: impossible d'acquérir le verrou (timeout)")
             return ""
+        
+        try:
+            start_time = time.time()
+            
+            for attempt in range(self.MAX_RECONNECT_ATTEMPTS):
+                remaining = timeout - (time.time() - start_time)
+                if remaining <= 0:
+                    _LOGGER.error("query: timeout global dépassé")
+                    return ""
+                
+                if not self.open():
+                    time.sleep(0.1)
+                    continue
+                
+                try:
+                    # Vider le buffer d'entrée
+                    self._serial.reset_input_buffer()
+                    
+                    payload = raw.encode("ascii", errors="ignore") + self.newline.encode()
+                    self._serial.write(payload)
+                    self._serial.flush()
+                    time.sleep(0.12)
+                    
+                    # Lire la réponse avec timeout strict
+                    read_deadline = time.time() + min(0.8, remaining - 0.2)
+                    buf = bytearray()
+                    
+                    while time.time() < read_deadline:
+                        try:
+                            # Vérifier s'il y a des données disponibles
+                            if self._serial.in_waiting > 0:
+                                chunk = self._serial.read(min(self._serial.in_waiting, 1024))
+                            else:
+                                chunk = self._serial.read_until(self.newline.encode(), size=256)
+                            
+                            if chunk:
+                                buf.extend(chunk)
+                                # Si on a reçu le terminateur, on peut sortir
+                                if self.newline.encode() in chunk:
+                                    break
+                                time.sleep(0.02)
+                            else:
+                                # Pas de données, sortir de la boucle
+                                break
+                        except serial.SerialException as exc:
+                            _LOGGER.debug("query: erreur lecture: %s", exc)
+                            break
+                    
+                    if buf:
+                        try:
+                            text = buf.decode("ascii", errors="ignore")
+                            text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+                            _LOGGER.debug("SerialDevice.query: cmd=%s response=%s", raw, repr(text))
+                            self._consecutive_errors = 0
+                            self._last_successful_op = time.time()
+                            return text
+                        except Exception:
+                            pass
+                    
+                    # Pas de réponse, mais pas forcément une erreur
+                    _LOGGER.debug("query: pas de réponse pour %s", raw)
+                    return ""
+                    
+                except serial.SerialTimeoutException:
+                    _LOGGER.warning("query: timeout, tentative %d/%d", attempt + 1, self.MAX_RECONNECT_ATTEMPTS)
+                    self._reset_port()
+                except Exception as exc:
+                    _LOGGER.error("query erreur: %s, tentative %d/%d", exc, attempt + 1, self.MAX_RECONNECT_ATTEMPTS)
+                    self._consecutive_errors += 1
+                    self._reset_port()
+            
+            return ""
+        finally:
+            self._lock.release()
+
+    def is_healthy(self) -> bool:
+        """Check if the serial connection appears healthy."""
+        if self._consecutive_errors >= 3:
+            return False
+        if time.time() - self._last_successful_op > 60:
+            # Pas d'opération réussie depuis 60 secondes
+            return False
+        return True
 
 
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
@@ -243,7 +370,25 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
 
             async def _async_poll(now):
                 try:
-                    await entity.async_update()
+                    # Vérifier si on doit sauter ce polling (commande utilisateur récente)
+                    if time.time() < entity._skip_poll_until:
+                        _LOGGER.debug("Polling skipped: user command in progress")
+                        return
+                    
+                    # Vérifier la santé du port série
+                    if not device.is_healthy():
+                        _LOGGER.warning("Port série non sain, tentative de reset")
+                        await hass.async_add_executor_job(device._reset_port)
+                    
+                    # Polling avec timeout pour éviter les blocages
+                    try:
+                        await asyncio.wait_for(entity.async_update(), timeout=8.0)
+                    except asyncio.TimeoutError:
+                        _LOGGER.warning("Polling timeout après 8 secondes - le port série est peut-être bloqué")
+                        # Forcer un reset du port
+                        await hass.async_add_executor_job(device._reset_port)
+                        return
+                    
                     # Only write HA state if the entity has been assigned an entity_id
                     # (avoids NoEntitySpecifiedError when the platform/setup timing
                     # results in update running before the entity is fully registered).
@@ -343,10 +488,6 @@ class MarantzRS6001(MediaPlayerEntity):
         self._muted = None
         self._source = None
         self._available = True
-        # Lock to serialize write operations to the serial port
-        # Single I/O lock to serialize all serial reads/writes (prevents
-        # overlapping queries that mix responses).
-        self._io_lock = asyncio.Lock()
         # None = unknown, True/False = whether absolute volume set is supported
         self._absolute_supported = None
         # Debounce task and pending volume for slider movements
@@ -354,6 +495,17 @@ class MarantzRS6001(MediaPlayerEntity):
         self._pending_volume = None
         # debounce interval in seconds for slider aggregation
         self._debounce_interval = 0.35
+        
+        # Contrôle du polling : éviter de polluer pendant les commandes utilisateur
+        self._user_command_in_progress = False
+        self._last_user_command_time = 0.0
+        self._skip_poll_until = 0.0  # Timestamp jusqu'auquel sauter le polling
+        # Flag pour indiquer qu'un update est en cours (évite les updates parallèles)
+        self._update_in_progress = False
+        # Verrouillage du volume : après un changement utilisateur, on garde la valeur
+        # choisie pendant quelques secondes sans la remplacer par la lecture de l'ampli
+        self._volume_locked_until = 0.0
+        self._volume_lock_duration = 4.0  # secondes
 
         # Build a set of supported MediaPlayerEntityFeature flags so that
         # membership checks like "MediaPlayerEntityFeature.GROUPING in self.supported_features"
@@ -555,235 +707,235 @@ class MarantzRS6001(MediaPlayerEntity):
         except Exception as exc:  # pragma: no cover - runtime
             _LOGGER.exception("Error in select_source: %s", exc)
 
-    async def _write_opportunistic(self, cmd: str, verify_cmd: Optional[str] = None) -> None:
-        """Try to write quickly even if the I/O lock is held.
+    async def _write_opportunistic(self, cmd: str, verify_cmd: Optional[str] = None) -> bool:
+        """Send a command to the device with user-command tracking.
 
-        Attempt to acquire `_io_lock` with a short timeout. If acquired,
-        perform the write under the lock (safe). If the lock cannot be
-        acquired quickly, perform the write anyway (opportunistic) and
-        schedule a short delayed verification under `_io_lock` using
-        `verify_cmd` when provided.
+        The SerialDevice class handles its own thread-level locking, so we
+        don't need an asyncio lock here. We just track that a user command
+        is in progress to skip polling during this time.
+        
+        Returns True if the write was successful.
         """
-        lock_acquired = False
+        # Marquer qu'une commande utilisateur est en cours
+        self._user_command_in_progress = True
+        self._last_user_command_time = time.time()
+        # Retarder le prochain polling de 3 secondes
+        self._skip_poll_until = time.time() + 3.0
+        
+        success = False
         try:
-            try:
-                await asyncio.wait_for(self._io_lock.acquire(), timeout=0.12)
-                lock_acquired = True
-            except asyncio.TimeoutError:
-                lock_acquired = False
-
-            # Perform the actual write regardless; if we have the lock we
-            # keep it while writing, otherwise we write opportunistically.
-            await self.hass.async_add_executor_job(self._device.write_raw, cmd)
+            # SerialDevice.write_raw gère son propre timeout et locking
+            result = await self.hass.async_add_executor_job(self._device.write_raw, cmd)
+            success = result if isinstance(result, bool) else True
+            if not success:
+                _LOGGER.warning("_write_opportunistic: échec de l'écriture de %s", cmd)
+        except Exception as exc:
+            _LOGGER.error("_write_opportunistic: erreur lors de l'écriture: %s", exc)
+            success = False
         finally:
-            if lock_acquired:
+            self._user_command_in_progress = False
+
+        # Schedule a delayed verification if requested (fire and forget)
+        if success and verify_cmd:
+            async def _verify():
+                await asyncio.sleep(0.3)
                 try:
-                    self._io_lock.release()
+                    resp = await self.hass.async_add_executor_job(self._device.query, verify_cmd)
+                    _LOGGER.debug("verify %s -> %s", verify_cmd, resp)
                 except Exception:
                     pass
 
-        # If we wrote without owning the lock and a verification command is
-        # provided, schedule a short delayed verification under the lock so
-        # that eventual consistency is achieved.
-        if (not lock_acquired) and verify_cmd:
-            async def _verify():
-                await asyncio.sleep(0.18)
-                async with self._io_lock:
-                    try:
-                        resp = await self.hass.async_add_executor_job(self._device.query, verify_cmd)
-                    except Exception:
-                        resp = None
-                    _LOGGER.debug("opportunistic verify %s -> %s", verify_cmd, resp)
-
             asyncio.create_task(_verify())
+        
+        return success
 
     async def _apply_volume(self, volume: float) -> None:
-        """Apply a volume change (called after debounce)."""
-        # This reuses the previous logic for applying volume: prefer absolute
-        # set if supported, otherwise use stepping. It's run under debounce
-        # so frequent slider moves won't flood the serial port.
+        """Apply a volume change (called after debounce).
+        
+        SerialDevice handles its own thread-level locking, so we don't need
+        an asyncio lock here.
+        """
         if volume is None:
             return
         volume = max(0.0, min(1.0, float(volume)))
+        
+        # Marquer qu'une commande utilisateur est en cours
+        self._user_command_in_progress = True
+        self._skip_poll_until = time.time() + 3.0
+        
+        try:
+            # Range used by many Marantz devices
+            max_db = 18.0
+            min_db = -80.0
 
-        # Range used by many Marantz devices
-        max_db = 18.0
-        min_db = -80.0
+            tmpl = self._cmd.get("volume_set_template") or self._cmd.get("volume_set")
 
-        tmpl = self._cmd.get("volume_set_template") or self._cmd.get("volume_set")
-
-        # Attempt absolute set if available and not previously marked unsupported
-        if tmpl and (self._absolute_supported is not False):
-            db = min_db + volume * (max_db - min_db)
-            # Build two candidate absolute commands:
-            # 1) the existing template (e.g. "@VOL:{value:03d}") if provided
-            # 2) Marantz-usb style absolute command (e.g. "@VOL:0-23") which many users report works faster
-            candidate_cmds = []
-            try:
-                val_tenths = int(round(db * 10))
-            except Exception:
-                val_tenths = int(round(db))
-            if tmpl:
+            # Attempt absolute set if available and not previously marked unsupported
+            if tmpl and (self._absolute_supported is not False):
+                db = min_db + volume * (max_db - min_db)
+                candidate_cmds = []
                 try:
-                    tmpl_cmd = tmpl.format(value=val_tenths)
+                    val_tenths = int(round(db * 10))
                 except Exception:
-                    tmpl_cmd = tmpl.replace("{value}", str(val_tenths))
-            else:
-                tmpl_cmd = None
+                    val_tenths = int(round(db))
+                if tmpl:
+                    try:
+                        tmpl_cmd = tmpl.format(value=val_tenths)
+                    except Exception:
+                        tmpl_cmd = tmpl.replace("{value}", str(val_tenths))
+                else:
+                    tmpl_cmd = None
 
-            # marantzusb-style: prefix '0' then signed integer decibels, e.g. '@VOL:0-23'
-            marantzusb_cmd = None
-            try:
-                db_int = int(round(db))
-                marantzusb_cmd = f"@VOL:0{db_int:+d}"
-            except Exception:
+                # marantzusb-style: prefix '0' then signed integer decibels
                 marantzusb_cmd = None
+                try:
+                    db_int = int(round(db))
+                    marantzusb_cmd = f"@VOL:0{db_int:+d}"
+                except Exception:
+                    marantzusb_cmd = None
 
-            # Build candidate list depending on config preference:
-            # - if user requests marantzusb format, try that only
-            # - otherwise try template first (if present), then marantzusb as fallback
-            candidate_cmds = []
-            if self._use_marantzusb_format:
-                if marantzusb_cmd:
-                    candidate_cmds.append(marantzusb_cmd)
-            else:
-                if tmpl_cmd:
-                    candidate_cmds.append(tmpl_cmd)
-                if marantzusb_cmd:
-                    candidate_cmds.append(marantzusb_cmd)
+                candidate_cmds = []
+                if self._use_marantzusb_format:
+                    if marantzusb_cmd:
+                        candidate_cmds.append(marantzusb_cmd)
+                else:
+                    if tmpl_cmd:
+                        candidate_cmds.append(tmpl_cmd)
+                    if marantzusb_cmd:
+                        candidate_cmds.append(marantzusb_cmd)
 
-            _LOGGER.debug("Debounced: trying absolute volume candidate commands: %s", candidate_cmds)
+                _LOGGER.debug("Debounced: trying absolute volume candidate commands: %s", candidate_cmds)
 
-            # Try candidates in order until verification succeeds
-            query_cmd = self._cmd.get("query_volume")
-            new_level = None
-            for cmd in candidate_cmds:
-                await self._write_opportunistic(cmd, verify_cmd=query_cmd)
+                query_cmd = self._cmd.get("query_volume")
+                new_level = None
+                for cmd in candidate_cmds:
+                    # Send command
+                    result = await self.hass.async_add_executor_job(self._device.write_raw, cmd)
+                    if not result:
+                        continue
 
-                # verify
-                if query_cmd:
-                    await asyncio.sleep(0.12)
-                    async with self._io_lock:
+                    # verify
+                    if query_cmd:
+                        await asyncio.sleep(0.15)
                         try:
                             resp = await self.hass.async_add_executor_job(self._device.query, query_cmd)
                         except Exception:
                             resp = None
-                    if resp:
-                        m = re.search(r"VOL[: ]\s*([-+]?[0-9]+(?:\.[0-9]+)?)", resp)
-                        if not m:
-                            m2 = re.search(r"L[: ]\s*([0-9]+)", resp)
-                            sval = m2.group(1) if m2 else None
-                        else:
-                            sval = m.group(1)
-                        if sval is not None:
-                            try:
-                                if re.fullmatch(r"\d{3}", sval):
-                                    db2 = int(sval) / 10.0
-                                else:
-                                    db2 = float(sval)
-                                db2 = max(min_db, min(max_db, db2))
-                                new_level = (db2 - min_db) / (max_db - min_db)
-                            except Exception:
-                                new_level = None
+                        if resp:
+                            m = re.search(r"VOL[: ]\s*([-+]?[0-9]+(?:\.[0-9]+)?)", resp)
+                            if not m:
+                                m2 = re.search(r"L[: ]\s*([0-9]+)", resp)
+                                sval = m2.group(1) if m2 else None
+                            else:
+                                sval = m.group(1)
+                            if sval is not None:
+                                try:
+                                    if re.fullmatch(r"\d{3}", sval):
+                                        db2 = int(sval) / 10.0
+                                    else:
+                                        db2 = float(sval)
+                                    db2 = max(min_db, min(max_db, db2))
+                                    new_level = (db2 - min_db) / (max_db - min_db)
+                                except Exception:
+                                    new_level = None
 
-                if new_level is not None and abs(new_level - volume) <= 0.02:
-                    self._absolute_supported = True
-                    if self._optimistic:
-                        self._volume_level = new_level
-                        try:
-                            self.async_write_ha_state()
-                        except Exception:
-                            pass
-                    break
-
-            if new_level is None:
-                # none of the absolute candidates worked
-                self._absolute_supported = False
-                _LOGGER.debug("Debounced: absolute set did not take effect (new_level=%s), falling back to step commands", new_level)
-
-        # Fallback: compute steps in dB and send that many +/- commands
-        up_cmd = self._cmd.get("volume_up")
-        down_cmd = self._cmd.get("volume_down")
-        if not up_cmd and not down_cmd:
-            _LOGGER.warning("No volume step commands available; cannot apply volume change")
-            return
-
-        # Query current volume if possible to be accurate
-        current_level = self._volume_level
-        query_cmd = self._cmd.get("query_volume")
-        if query_cmd:
-            try:
-                async with self._io_lock:
-                    resp = await self.hass.async_add_executor_job(self._device.query, query_cmd)
-            except Exception:
-                resp = None
-            if resp:
-                m = re.search(r"VOL[: ]\s*([-+]?[0-9]+(?:\.[0-9]+)?)", resp)
-                if not m:
-                    m2 = re.search(r"L[: ]\s*([0-9]+)", resp)
-                    sval = m2.group(1) if m2 else None
-                else:
-                    sval = m.group(1)
-                if sval is not None:
-                    try:
-                        if re.fullmatch(r"\d{3}", sval):
-                            dbc = int(sval) / 10.0
-                        else:
-                            dbc = float(sval)
-                        dbc = max(min_db, min(max_db, dbc))
-                        current_level = (dbc - min_db) / (max_db - min_db)
-                    except Exception:
-                        pass
-
-        if current_level is None:
-            # just do one best-effort step
-            async with self._io_lock:
-                await self.hass.async_add_executor_job(self._device.write_raw, up_cmd if volume > 0.5 else down_cmd)
-            return
-
-        current_db = min_db + current_level * (max_db - min_db)
-        target_db = min_db + volume * (max_db - min_db)
-        delta_db = target_db - current_db
-        steps = int(round(abs(delta_db)))
-        if steps <= 0:
-            return
-
-        cmd = up_cmd if delta_db > 0 else down_cmd
-        async with self._io_lock:
-            for _ in range(steps):
-                await self.hass.async_add_executor_job(self._device.write_raw, cmd)
-                await asyncio.sleep(0.08)
-
-        # After applying steps, query once and update internal state
-        if query_cmd:
-            try:
-                async with self._io_lock:
-                    resp = await self.hass.async_add_executor_job(self._device.query, query_cmd)
-            except Exception:
-                resp = None
-            if resp:
-                m = re.search(r"VOL[: ]\s*([-+]?[0-9]+(?:\.[0-9]+)?)", resp)
-                if not m:
-                    m2 = re.search(r"L[: ]\s*([0-9]+)", resp)
-                    sval = m2.group(1) if m2 else None
-                else:
-                    sval = m.group(1)
-                if sval is not None:
-                    try:
-                        if re.fullmatch(r"\\d{3}", sval):
-                            dbc = int(sval) / 10.0
-                        else:
-                            dbc = float(sval)
-                        dbc = max(min_db, min(max_db, dbc))
-                        new_level = (dbc - min_db) / (max_db - min_db)
-                        self._volume_level = new_level
+                    if new_level is not None and abs(new_level - volume) <= 0.02:
+                        self._absolute_supported = True
                         if self._optimistic:
+                            self._volume_level = new_level
                             try:
                                 self.async_write_ha_state()
                             except Exception:
                                 pass
-                    except Exception:
-                        pass
+                        return  # Succès!
+
+                if new_level is None:
+                    self._absolute_supported = False
+                    _LOGGER.debug("Debounced: absolute set did not take effect, falling back to step commands")
+
+            # Fallback: compute steps in dB and send that many +/- commands
+            up_cmd = self._cmd.get("volume_up")
+            down_cmd = self._cmd.get("volume_down")
+            if not up_cmd and not down_cmd:
+                _LOGGER.warning("No volume step commands available; cannot apply volume change")
+                return
+
+            # Query current volume if possible
+            current_level = self._volume_level
+            query_cmd = self._cmd.get("query_volume")
+            if query_cmd:
+                try:
+                    resp = await self.hass.async_add_executor_job(self._device.query, query_cmd)
+                except Exception:
+                    resp = None
+                if resp:
+                    m = re.search(r"VOL[: ]\s*([-+]?[0-9]+(?:\.[0-9]+)?)", resp)
+                    if not m:
+                        m2 = re.search(r"L[: ]\s*([0-9]+)", resp)
+                        sval = m2.group(1) if m2 else None
+                    else:
+                        sval = m.group(1)
+                    if sval is not None:
+                        try:
+                            if re.fullmatch(r"\d{3}", sval):
+                                dbc = int(sval) / 10.0
+                            else:
+                                dbc = float(sval)
+                            dbc = max(min_db, min(max_db, dbc))
+                            current_level = (dbc - min_db) / (max_db - min_db)
+                        except Exception:
+                            pass
+
+            if current_level is None:
+                # just do one best-effort step
+                await self.hass.async_add_executor_job(
+                    self._device.write_raw, up_cmd if volume > 0.5 else down_cmd
+                )
+                return
+
+            current_db = min_db + current_level * (max_db - min_db)
+            target_db = min_db + volume * (max_db - min_db)
+            delta_db = target_db - current_db
+            steps = int(round(abs(delta_db)))
+            if steps <= 0:
+                return
+
+            cmd = up_cmd if delta_db > 0 else down_cmd
+            for _ in range(steps):
+                await self.hass.async_add_executor_job(self._device.write_raw, cmd)
+                await asyncio.sleep(0.08)
+
+            # After applying steps, query once and update internal state
+            if query_cmd:
+                try:
+                    resp = await self.hass.async_add_executor_job(self._device.query, query_cmd)
+                except Exception:
+                    resp = None
+                if resp:
+                    m = re.search(r"VOL[: ]\s*([-+]?[0-9]+(?:\.[0-9]+)?)", resp)
+                    if not m:
+                        m2 = re.search(r"L[: ]\s*([0-9]+)", resp)
+                        sval = m2.group(1) if m2 else None
+                    else:
+                        sval = m.group(1)
+                    if sval is not None:
+                        try:
+                            if re.fullmatch(r"\d{3}", sval):
+                                dbc = int(sval) / 10.0
+                            else:
+                                dbc = float(sval)
+                            dbc = max(min_db, min(max_db, dbc))
+                            new_level = (dbc - min_db) / (max_db - min_db)
+                            self._volume_level = new_level
+                            if self._optimistic:
+                                try:
+                                    self.async_write_ha_state()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+        finally:
+            self._user_command_in_progress = False
 
     async def async_set_volume_level(self, volume: float) -> None:
         """Set volume to a specific level (0..1).
@@ -795,13 +947,14 @@ class MarantzRS6001(MediaPlayerEntity):
             return
         volume = max(0.0, min(1.0, float(volume)))
 
-        # optimistic immediate UI update
-        if self._optimistic:
-            self._volume_level = volume
-            try:
-                self.async_write_ha_state()
-            except Exception:
-                pass
+        # Mise à jour immédiate de l'UI avec la valeur choisie
+        # et verrouillage pour éviter que le polling ne l'écrase
+        self._volume_level = volume
+        self._volume_locked_until = time.time() + self._volume_lock_duration
+        try:
+            self.async_write_ha_state()
+        except Exception:
+            pass
 
         # store pending target and debounce
         self._pending_volume = volume
@@ -818,142 +971,146 @@ class MarantzRS6001(MediaPlayerEntity):
         self._debounce_task = asyncio.create_task(_delayed_apply())
 
     async def async_update(self):
-        """Poll the device for current power, volume and source state."""
+        """Poll the device for current power, volume and source state.
+        
+        SerialDevice handles its own thread-level locking, so we don't need
+        an asyncio lock here. We just use _update_in_progress to avoid
+        parallel updates.
+        """
+        # Vérifier si on doit sauter cet update (commande utilisateur récente)
+        if self._user_command_in_progress:
+            _LOGGER.debug("async_update: sauté car commande utilisateur en cours")
+            return
+        
+        # Vérifier si un update est déjà en cours
+        if self._update_in_progress:
+            _LOGGER.debug("async_update: sauté car update déjà en cours")
+            return
+        
+        self._update_in_progress = True
         try:
-            # Serialize the entire update sequence to avoid overlapping queries/writes
-            # which produce interleaved/mixed responses from the device.
-            async with self._io_lock:
-                # QUERY POWER
-                if "query_power" in self._cmd:
-                    try:
-                        resp = await self.hass.async_add_executor_job(self._device.query, self._cmd.get("query_power"))
-                    except Exception:
-                        resp = None
-                    _LOGGER.debug("query_power response: %s", resp)
-                    if resp:
-                        m = re.search(r"PWR[: ]\s*([0-9A-Za-z]+)", resp, re.IGNORECASE)
-                        if m:
-                            code = m.group(1).strip()
-                            # device sent numeric power state; common: 1=on,2=off
-                            try:
-                                if code.isdigit():
-                                    v = int(code)
-                                    # In our command_map 2==ON, 1==OFF for this Marantz model
-                                    self._is_on = bool(v == 2)
-                                else:
-                                    self._is_on = code.lower() in ("on", "1", "true")
-                            except Exception:
-                                self._is_on = None
+            # QUERY POWER
+            if "query_power" in self._cmd:
+                try:
+                    resp = await self.hass.async_add_executor_job(
+                        self._device.query, self._cmd.get("query_power")
+                    )
+                except Exception:
+                    resp = None
+                _LOGGER.debug("query_power response: %s", resp)
+                if resp:
+                    m = re.search(r"PWR[: ]\s*([0-9A-Za-z]+)", resp, re.IGNORECASE)
+                    if m:
+                        code = m.group(1).strip()
+                        try:
+                            if code.isdigit():
+                                v = int(code)
+                                self._is_on = bool(v == 2)
+                            else:
+                                self._is_on = code.lower() in ("on", "1", "true")
+                        except Exception:
+                            self._is_on = None
 
-                # QUERY VOLUME
-                if "query_volume" in self._cmd:
-                    try:
-                        resp = await self.hass.async_add_executor_job(self._device.query, self._cmd.get("query_volume"))
-                    except Exception:
-                        resp = None
-                    _LOGGER.debug("query_volume response: %s", resp)
-                    if resp:
-                        m = re.search(r"VOL[: ]\s*([-+]?[0-9]+(?:\.[0-9]+)?)", resp)
-                        if not m:
-                            m2 = re.search(r"L[: ]\s*([0-9]+)", resp)
-                            sval = m2.group(1) if m2 else None
-                        else:
-                            sval = m.group(1)
-                        if sval is not None:
-                            try:
-                                if re.fullmatch(r"\d{3}", sval):
-                                    db = int(sval) / 10.0
-                                else:
-                                    db = float(sval)
-                                # Stocke la valeur brute exacte
-                                self._volume_db_exact = db
-                                # Conversion pour le slider (adapter la plage si besoin)
+            # QUERY VOLUME
+            if "query_volume" in self._cmd:
+                try:
+                    resp = await self.hass.async_add_executor_job(
+                        self._device.query, self._cmd.get("query_volume")
+                    )
+                except Exception:
+                    resp = None
+                _LOGGER.debug("query_volume response: %s", resp)
+                if resp:
+                    m = re.search(r"VOL[: ]\s*([-+]?[0-9]+(?:\.[0-9]+)?)", resp)
+                    if not m:
+                        m2 = re.search(r"L[: ]\s*([0-9]+)", resp)
+                        sval = m2.group(1) if m2 else None
+                    else:
+                        sval = m.group(1)
+                    if sval is not None:
+                        try:
+                            if re.fullmatch(r"\d{3}", sval):
+                                db = int(sval) / 10.0
+                            else:
+                                db = float(sval)
+                            self._volume_db_exact = db
+                            # Ne mettre à jour le niveau que si le volume n'est pas verrouillé
+                            if time.time() >= self._volume_locked_until:
                                 self._volume_level = (db - (-72.0)) / (15.0 - (-72.0))
                                 self._volume_level = max(0.0, min(1.0, self._volume_level))
                                 _LOGGER.debug("Parsed volume dB=%s -> level=%s", db, self._volume_level)
-                            except Exception:
-                                self._volume_db_exact = None
-
-                # QUERY SOURCE
-                if "query_source" in self._cmd:
-                    try:
-                        resp = await self.hass.async_add_executor_job(self._device.query, self._cmd.get("query_source"))
-                    except Exception:
-                        resp = None
-                    _LOGGER.debug("query_source response: %s", resp)
-                    if resp:
-                        m = re.search(r"SRC[: ]\s*([0-9A-Za-z]+)", resp, re.IGNORECASE)
-                        if m:
-                            code = m.group(1).upper()
-                            src_map = self._cmd.get("sources", {}) or {}
-                            found = None
-                            for name, cmdval in src_map.items():
-                                if not isinstance(cmdval, str):
-                                    continue
-
-                                # Normalize the command value to extract the device code.
-                                # Accept formats like '@SRC:22', 'SRC:22', '22', 'SRC 22', etc.
-                                try:
-                                    s = cmdval.strip()
-                                    if s.startswith("@"):
-                                        s = s[1:]
-                                    # Prefer the part after ':' if present, otherwise
-                                    # try to take a trailing alnum group.
-                                    if ":" in s:
-                                        part = s.split(":", 1)[1]
-                                    else:
-                                        mpart = re.search(r"([0-9A-Za-z]+)$", s)
-                                        part = mpart.group(1) if mpart else s
-                                    cmd_code = re.sub(r"[^0-9A-Za-z]", "", part).upper()
-                                except Exception:
-                                    cmd_code = str(cmdval).upper()
-
-                                # Compare normalized codes, allowing for leading zeros
-                                try:
-                                    dev = code
-                                    cmd = cmd_code
-                                    if cmd.lstrip("0") == dev.lstrip("0") or cmd == dev:
-                                        found = name
-                                        break
-
-                                    # Handle devices that appear to repeat the code
-                                    # characters (e.g. returns '11' for configured
-                                    # '1'). Match when the device string equals the
-                                    # command code duplicated, or when it's a double
-                                    # character equal to the single command char.
-                                    if len(dev) == 2 * len(cmd) and dev == cmd * 2:
-                                        found = name
-                                        break
-                                    if len(dev) == 2 and dev[0] == dev[1] and cmd == dev[0]:
-                                        found = name
-                                        break
-                                except Exception:
-                                    if cmd_code == code:
-                                        found = name
-                                        break
-                            if found:
-                                self._source = found
                             else:
-                                # Unknown source code returned by device. Do NOT
-                                # persist automatic mappings to `command_map_parsed.yaml`
-                                # (this was adding noisy SRC_xx entries whenever the
-                                # source changed). Instead, set the current source to
-                                # the raw code so the UI reflects the device state
-                                # without modifying the persistent mapping.
-                                self._source = code
-                                _LOGGER.debug("Unknown source code received (not persisting): %s", code)
+                                _LOGGER.debug("Volume verrouillé, valeur lue ignorée: dB=%s", db)
+                        except Exception:
+                            self._volume_db_exact = None
 
-                # Ensure UI shows a slider even if we haven't parsed a volume yet
-                if self._volume_level is None:
-                    try:
-                        feats = self.supported_features
-                        if (MediaPlayerEntityFeature.VOLUME_SET in feats) or (MediaPlayerEntityFeature.VOLUME_STEP in feats):
-                            self._volume_level = 0.5
-                            _LOGGER.debug("Volume unknown — defaulting to level=%s to show slider", self._volume_level)
-                    except Exception:
-                        pass
+            # QUERY SOURCE
+            if "query_source" in self._cmd:
+                try:
+                    resp = await self.hass.async_add_executor_job(
+                        self._device.query, self._cmd.get("query_source")
+                    )
+                except Exception:
+                    resp = None
+                _LOGGER.debug("query_source response: %s", resp)
+                if resp:
+                    m = re.search(r"SRC[: ]\s*([0-9A-Za-z]+)", resp, re.IGNORECASE)
+                    if m:
+                        code = m.group(1).upper()
+                        src_map = self._cmd.get("sources", {}) or {}
+                        found = None
+                        for name, cmdval in src_map.items():
+                            if not isinstance(cmdval, str):
+                                continue
+                            try:
+                                s = cmdval.strip()
+                                if s.startswith("@"):
+                                    s = s[1:]
+                                if ":" in s:
+                                    part = s.split(":", 1)[1]
+                                else:
+                                    mpart = re.search(r"([0-9A-Za-z]+)$", s)
+                                    part = mpart.group(1) if mpart else s
+                                cmd_code = re.sub(r"[^0-9A-Za-z]", "", part).upper()
+                            except Exception:
+                                cmd_code = str(cmdval).upper()
 
-                self._available = True
-        except Exception as exc:  # pragma: no cover - runtime errors handled here
+                            try:
+                                dev = code
+                                cmd = cmd_code
+                                if cmd.lstrip("0") == dev.lstrip("0") or cmd == dev:
+                                    found = name
+                                    break
+                                if len(dev) == 2 * len(cmd) and dev == cmd * 2:
+                                    found = name
+                                    break
+                                if len(dev) == 2 and dev[0] == dev[1] and cmd == dev[0]:
+                                    found = name
+                                    break
+                            except Exception:
+                                if cmd_code == code:
+                                    found = name
+                                    break
+                        if found:
+                            self._source = found
+                        else:
+                            self._source = code
+                            _LOGGER.debug("Unknown source code received (not persisting): %s", code)
+
+            # Ensure UI shows a slider even if we haven't parsed a volume yet
+            if self._volume_level is None:
+                try:
+                    feats = self.supported_features
+                    if (MediaPlayerEntityFeature.VOLUME_SET in feats) or (MediaPlayerEntityFeature.VOLUME_STEP in feats):
+                        self._volume_level = 0.5
+                        _LOGGER.debug("Volume unknown — defaulting to level=%s to show slider", self._volume_level)
+                except Exception:
+                    pass
+
+            self._available = True
+                
+        except Exception as exc:
             _LOGGER.exception("Error updating Marantz RS232 device: %s", exc)
             self._available = False
+        finally:
+            self._update_in_progress = False
