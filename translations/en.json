@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Marantz RS232",
+        "description": "Configure the serial connection to your Marantz receiver.",
+        "data": {
+          "serial_port": "Serial Port",
+          "baudrate": "Baudrate",
+          "name": "Name"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "Device is already configured"
+    }
+  }
+}

@@ -1,13 +1,30 @@
-"""Marantz RS232 integration (minimal scaffold).
+"""Marantz RS232 integration."""
+import logging
 
-This file intentionally minimal. Platform setup happens in `media_player.py`.
-"""
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import Platform
+from homeassistant.core import HomeAssistant
 
-DOMAIN = "marantz_rs232"
+from .const import DOMAIN
 
-async def async_setup(hass, config):
-    """Set up the Marantz RS232 integration (YAML-style supported).
+PLATFORMS: list[Platform] = [Platform.MEDIA_PLAYER]
+_LOGGER = logging.getLogger(__name__)
 
-    Configuration is read by the platform implementation.
-    """
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    """Set up the Marantz RS232 integration (YAML-style supported)."""
     return True
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up Marantz RS232 from a config entry."""
+    hass.data.setdefault(DOMAIN, {})
+    
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    return True
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload a config entry."""
+    if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        pass
+        # Clean up any data stored in hass.data[DOMAIN] if needed
+    
+    return unload_ok

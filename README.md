@@ -1,157 +1,95 @@
-Guide d'installation pour l'intégration Marantz RS232
-===================================================
+# Marantz RS232 Media Player for Home Assistant
 
-Installation
-------------
+This custom component integrates Marantz receivers (tested with SR6001) into Home Assistant via an RS232 serial connection. It provides a robust `media_player` entity with support for power, volume, mute, and source selection.
 
-1. Copier le dossier `marantz_rs232` dans `config/custom_components/` de Home Assistant.
-   - Exemple sur Windows : `C:\Users\<user>\AppData\Roaming\.homeassistant\custom_components\`
-2. Installer la dépendance Python `pyserial` si nécessaire (généralement gérée par Home Assistant si listée dans `manifest.json`).
-3. Ajouter dans `configuration.yaml` la configuration du platform `media_player` :
+## Features
+
+-   **Power Control**: Turn the receiver on and off.
+-   **Volume Control**:
+    -   Set volume level (absolute dB support).
+    -   Volume Up/Down steps.
+    -   Mute/Unmute.
+    -   **Smart Volume Handling**: Includes debouncing and locking to ensure smooth slider operation in the UI, preventing "jumping" values during polling.
+-   **Source Selection**: Switch between input sources.
+-   **Robust Serial Communication**:
+    -   Automatic reconnection and error handling.
+    -   Thread-safe serial operations.
+    -   Configurable polling interval.
+-   **Customizable Commands**: Define your own RS232 commands via YAML configuration or use the built-in defaults.
+-   **Debugging**: `send_raw` service to send arbitrary commands for testing.
+
+## Installation
+
+1.  Copy the `marantz_rs232` folder to your Home Assistant `custom_components` directory.
+2.  Restart Home Assistant.
+
+## Configuration
+
+Add the following to your `configuration.yaml`:
 
 ```yaml
 media_player:
   - platform: marantz_rs232
-    name: "Marantz SR6001"
-    serial_port: "/dev/ttyUSB0"   # ou COM3 sur Windows
-    baudrate: 9600
+    name: "Marantz Receiver"
+    serial_port: /dev/ttyUSB0  # Update with your serial port
+    baudrate: 9600             # Default is 9600
+    poll_interval: 10          # Polling interval in seconds
+    optimistic: false          # Set to true for immediate UI updates without waiting for device confirmation
+    use_marantzusb_format: true # Use specific volume command format (@VOL:0+...)
+    
+    # Optional: Override or add commands
     command_map:
-      # Exemples (placeholders) : remplacez par les commandes exactes du SR6001
-      power_on: "PWON"
-      power_off: "PWSTANDBY"
-      volume_up: "MVUP"
-      volume_down: "MVDOWN"
-      mute_on: "MUTON"
-      mute_off: "MUTOFF"
-      select_source: "SI{source}"  # template : {source} sera remplacé
-      query_power: "PW?"
-      query_volume: "MV?"
-      query_source: "SI?"
+      power_on: "@PWR:2"
+      power_off: "@PWR:1"
+      volume_up: "@VOL:1"
+      volume_down: "@VOL:2"
+      mute_on: "@AMT:2"
+      mute_off: "@AMT:1"
+      query_power: "@PWR:?"
+      query_volume: "@VOL:?"
+      query_source: "@SRC:?"
+      sources:
+        TV: "@SRC:C"
+        DVD: "@SRC:D"
+        Tuner: "@SRC:2"
 ```
 
-4. Redémarrer Home Assistant.
+### Command Map
 
-Remplir `command_map`
----------------------
+The integration uses a `command_map` to define the RS232 strings sent to the device. If not provided in the configuration, it attempts to load defaults from `command_map_parsed.yaml` included in the component.
 
-Le code fourni est un scaffold : il envoie les chaînes présentes dans `command_map`
-vers le port série. Vous devez fournir la correspondance exacte des commandes RS232
-du Marantz SR6001 (fournie dans votre documentation PDF). Si vous voulez, je
-peux extraire automatiquement la table de commandes depuis le PDF joint et remplir
-les valeurs ici — dites-moi si vous m'autorisez à le faire.
+Key commands include:
+-   `power_on`, `power_off`
+-   `volume_up`, `volume_down`
+-   `mute_on`, `mute_off`
+-   `query_power`, `query_volume`, `query_source`
+-   `sources`: A dictionary mapping source names to commands.
 
-Tests
------
+## Services
 
-- Dans Outils de développement -> Services, vous pouvez appeler `media_player.turn_on`
-  (target = votre entité) pour tester l'envoi de la commande `power_on`.
-- Vous pouvez aussi utiliser la fonction `query_*` définie dans `command_map` pour
-  récupérer des états, qui seront loggés. Une fois la syntaxe de réponse connue,
-  nous adapterons le parsing pour alimenter correctement `state`, `volume_level` et `source`.
+### `marantz_rs232.send_raw`
 
-Support et itération
---------------------
+Sends a raw RS232 command to the receiver. Useful for testing or advanced usage.
 
-Je peux :
-- Extraire les commandes RS232 du PDF (si vous me donnez l'autorisation).
-- Adapter le parsing des réponses (une fois que vous m'indiquerez leur format clair).
-- Ajouter des services personnalisés pour envoyer des commandes brutes depuis Home Assistant.
+**Parameters:**
+-   `command` (Required): The raw string to send (e.g., `@PWR:?`).
+-   `entity_id` (Optional): The entity ID to target.
 
-Mapping extrait automatiquement
-------------------------------
-
-J'ai extrait la table des commandes du PDF et créé un exemple de `command_map`
-prêt à l'emploi dans `command_map_parsed.yaml` (dans le dossier du composant).
-Ce fichier contient les commandes courantes détectées pour :
-
-- Power (on/off/toggle)
-- Volume (up/down et set absolu)
-- Mute (audio/video)
-- Sélection des sources courantes (TV, DVD, AUX1, HDMI1, etc.)
-- Commandes de requête (ex: `@PWR:?`)
-
-Important : les commandes brutes doivent être envoyées précédées du caractère de
-démarrage `@` et terminées par CR (retour chariot, 0x0D). Vérifiez les résultats
-avec les logs et ajustez si nécessaire.
-
-Si vous voulez, j'intègre ce mapping directement dans `media_player.py` comme
-valeur par défaut ou je peux le laisser séparé pour que vous le modifiiez plus
-facilement.
-
-Service de debug `marantz_rs232.send_raw`
-----------------------------------------
-
-Un service `marantz_rs232.send_raw` a été ajouté pour envoyer une commande RS232
-arbitraire depuis Home Assistant. Exemple d'utilisation depuis Developer Tools → Services :
-
-Service: `marantz_rs232.send_raw`
-
-Service Data (YAML) :
-
+**Example:**
 ```yaml
-command: "@PWR:2"
-entity_id: media_player.marantz_sr6001  # optionnel, cible l'entité
+service: marantz_rs232.send_raw
+data:
+  command: "@VOL:?"
+  entity_id: media_player.marantz_receiver
 ```
 
-Ce service est utile pour tester des commandes sans modifier `configuration.yaml` ou
-redémarrer Home Assistant.
+## Troubleshooting
 
-Lecture de la réponse et écoute d'évènement
-----------------------------------------
-
-Le service lit maintenant la réponse renvoyée par l'ampli et publie un évènement
-`marantz_rs232_raw_response` sur le bus d'évènements Home Assistant. Pour écouter
-cet évènement (Developer Tools → Events) utilisez :
-
-Event to subscribe: `marantz_rs232_raw_response`
-
-Le payload de l'évènement contient :
-
-```json
-{
-  "entity_id": "media_player.marantz_sr6001",
-  "command": "@PWR:2",
-  "response": "... la réponse brute en texte ..."
-}
-```
-
-Utilisez cet évènement pour capturer les réponses et me les fournir si vous
-voulez que j'améliore le parsing automatique.
-
-Optimistic updates et mapping automatique
-----------------------------------------
-
-Options de configuration :
-
-- `poll_interval` (int) : intervalle en secondes pour interroger périodiquement l'ampli (par défaut 10).
-- `optimistic` (bool) : si `true`, l'entité mettra à jour son état immédiatement après l'envoi d'une commande (utile si l'ampli ne répond pas toujours).
-- `use_marantzusb_format` (bool) : si `true`, le composant enverra les commandes absolues de volume au format Marantz-USB (ex. `@VOL:0-23`) — ce format est plus rapide que l'envoi de pas et est activé par défaut.
-
-Exemple de configuration :
-
-```yaml
-media_player:
-  - platform: marantz_rs232
-    name: "Marantz SR6001"
-    serial_port: "/dev/ttyUSB0"
-    baudrate: 9600
-    poll_interval: 10
-    optimistic: true
-    use_marantzusb_format: true
-```
-
-
-Mapping automatique des sources inconnues
-
-- Lorsque l'intégration reçoit un code source inconnu (par ex. `@SRC:33`), elle crée automatiquement
-  une entrée dans `command_map_parsed.yaml` (clé `sources`) du composant, par exemple :
-
-```yaml
-sources:
-  SRC_33: "SRC:33"
-```
-
-  Ceci permet d'afficher immédiatement le code reçu comme source dans Home Assistant et de
-  modifier ultérieurement la clé `SRC_33` pour donner un nom lisible (par ex. `HDMI3`). L'écriture
-  sur le fichier est best-effort ; si votre installation n'autorise pas l'écriture, la création
-  de la clé échouera et un message d'erreur sera loggé.
+-   **Logs**: Enable debug logging for this component to see detailed serial communication.
+    ```yaml
+    logger:
+      default: info
+      logs:
+        custom_components.marantz_rs232: debug
+    ```
+-   **Serial Port**: Ensure the user running Home Assistant has permission to access the serial port (e.g., `dialout` group on Linux).

@@ -101,8 +101,8 @@ class SerialDevice:
     Includes robust timeout handling and automatic reconnection.
     """
 
-    # Timeout global pour éviter les blocages indéfinis
-    OPERATION_TIMEOUT = 3.0  # secondes
+    # Global timeout to avoid indefinite blocking
+    OPERATION_TIMEOUT = 3.0  # seconds
     MAX_RECONNECT_ATTEMPTS = 2
 
     def __init__(self, port: str, baudrate: int, newline: str = "\r"):
@@ -110,7 +110,7 @@ class SerialDevice:
         self.baudrate = baudrate
         self.newline = newline
         self._serial: Optional[serial.Serial] = None
-        self._lock = threading.Lock()  # Protège les opérations série
+        self._lock = threading.Lock()  # Protects serial operations
         self._consecutive_errors = 0
         self._last_successful_op = time.time()
 
@@ -119,25 +119,25 @@ class SerialDevice:
         try:
             if self._serial is not None and self._serial.is_open:
                 return True
-            # Fermer proprement si dans un état incohérent
+            # Cleanly close if in an inconsistent state
             if self._serial is not None:
                 try:
                     self._serial.close()
                 except Exception:
                     pass
                 self._serial = None
-            # Ouvrir avec un timeout de lecture court
+            # Open with a short read timeout
             self._serial = serial.Serial(
                 self.port, 
                 self.baudrate, 
-                timeout=0.5,  # Timeout lecture court
-                write_timeout=1.0  # Timeout écriture
+                timeout=0.5,  # Short read timeout
+                write_timeout=1.0  # Write timeout
             )
             self._consecutive_errors = 0
-            _LOGGER.debug("Port série %s ouvert avec succès", self.port)
+            _LOGGER.debug("Serial port %s opened successfully", self.port)
             return True
         except Exception as exc:
-            _LOGGER.error("Impossible d'ouvrir le port série %s: %s", self.port, exc)
+            _LOGGER.error("Unable to open serial port %s: %s", self.port, exc)
             self._serial = None
             return False
 
@@ -149,12 +149,12 @@ class SerialDevice:
                     self._serial.close()
                 self._serial = None
         except Exception as exc:
-            _LOGGER.debug("Erreur lors de la fermeture du port série: %s", exc)
+            _LOGGER.debug("Error closing serial port: %s", exc)
             self._serial = None
 
     def _reset_port(self) -> bool:
-        """Force reset du port série. Returns True if successful."""
-        _LOGGER.warning("Reset du port série %s...", self.port)
+        """Force reset of the serial port. Returns True if successful."""
+        _LOGGER.warning("Resetting serial port %s...", self.port)
         self.close()
         time.sleep(0.1)
         return self.open()
@@ -165,7 +165,7 @@ class SerialDevice:
             timeout = self.OPERATION_TIMEOUT
         
         if not self._lock.acquire(timeout=timeout):
-            _LOGGER.warning("write_raw: impossible d'acquérir le verrou (timeout)")
+            _LOGGER.warning("write_raw: unable to acquire lock (timeout)")
             return False
         
         try:
@@ -178,7 +178,7 @@ class SerialDevice:
             
             for attempt in range(self.MAX_RECONNECT_ATTEMPTS):
                 if time.time() - start_time > timeout:
-                    _LOGGER.error("write_raw: timeout global dépassé")
+                    _LOGGER.error("write_raw: global timeout exceeded")
                     return False
                 
                 if not self.open():
@@ -188,20 +188,20 @@ class SerialDevice:
                 try:
                     _LOGGER.debug("SerialDevice.write_raw: port=%s command=%s", self.port, raw)
                     self._serial.write(payload)
-                    self._serial.flush()  # S'assurer que les données sont envoyées
+                    self._serial.flush()  # Ensure data is sent
                     time.sleep(0.08)
                     self._consecutive_errors = 0
                     self._last_successful_op = time.time()
                     return True
                 except serial.SerialTimeoutException:
-                    _LOGGER.warning("write_raw: timeout écriture, tentative %d/%d", attempt + 1, self.MAX_RECONNECT_ATTEMPTS)
+                    _LOGGER.warning("write_raw: write timeout, attempt %d/%d", attempt + 1, self.MAX_RECONNECT_ATTEMPTS)
                     self._reset_port()
                 except Exception as exc:
-                    _LOGGER.error("write_raw erreur: %s, tentative %d/%d", exc, attempt + 1, self.MAX_RECONNECT_ATTEMPTS)
+                    _LOGGER.error("write_raw error: %s, attempt %d/%d", exc, attempt + 1, self.MAX_RECONNECT_ATTEMPTS)
                     self._consecutive_errors += 1
                     self._reset_port()
             
-            _LOGGER.error("write_raw: échec après %d tentatives", self.MAX_RECONNECT_ATTEMPTS)
+            _LOGGER.error("write_raw: failed after %d attempts", self.MAX_RECONNECT_ATTEMPTS)
             return False
         finally:
             self._lock.release()
@@ -212,7 +212,7 @@ class SerialDevice:
             timeout = self.OPERATION_TIMEOUT
         
         if not self._lock.acquire(timeout=timeout):
-            _LOGGER.warning("query: impossible d'acquérir le verrou (timeout)")
+            _LOGGER.warning("query: unable to acquire lock (timeout)")
             return ""
         
         try:
@@ -221,7 +221,7 @@ class SerialDevice:
             for attempt in range(self.MAX_RECONNECT_ATTEMPTS):
                 remaining = timeout - (time.time() - start_time)
                 if remaining <= 0:
-                    _LOGGER.error("query: timeout global dépassé")
+                    _LOGGER.error("query: global timeout exceeded")
                     return ""
                 
                 if not self.open():
@@ -229,7 +229,7 @@ class SerialDevice:
                     continue
                 
                 try:
-                    # Vider le buffer d'entrée
+                    # Clear input buffer
                     self._serial.reset_input_buffer()
                     
                     payload = raw.encode("ascii", errors="ignore") + self.newline.encode()
@@ -237,13 +237,13 @@ class SerialDevice:
                     self._serial.flush()
                     time.sleep(0.12)
                     
-                    # Lire la réponse avec timeout strict
+                    # Read response with strict timeout
                     read_deadline = time.time() + min(0.8, remaining - 0.2)
                     buf = bytearray()
                     
                     while time.time() < read_deadline:
                         try:
-                            # Vérifier s'il y a des données disponibles
+                            # Check if data is available
                             if self._serial.in_waiting > 0:
                                 chunk = self._serial.read(min(self._serial.in_waiting, 1024))
                             else:
@@ -251,15 +251,15 @@ class SerialDevice:
                             
                             if chunk:
                                 buf.extend(chunk)
-                                # Si on a reçu le terminateur, on peut sortir
+                                # If terminator received, we can exit
                                 if self.newline.encode() in chunk:
                                     break
                                 time.sleep(0.02)
                             else:
-                                # Pas de données, sortir de la boucle
+                                # No data, exit loop
                                 break
                         except serial.SerialException as exc:
-                            _LOGGER.debug("query: erreur lecture: %s", exc)
+                            _LOGGER.debug("query: read error: %s", exc)
                             break
                     
                     if buf:
@@ -273,15 +273,15 @@ class SerialDevice:
                         except Exception:
                             pass
                     
-                    # Pas de réponse, mais pas forcément une erreur
-                    _LOGGER.debug("query: pas de réponse pour %s", raw)
+                    # No response, but not necessarily an error
+                    _LOGGER.debug("query: no response for %s", raw)
                     return ""
                     
                 except serial.SerialTimeoutException:
-                    _LOGGER.warning("query: timeout, tentative %d/%d", attempt + 1, self.MAX_RECONNECT_ATTEMPTS)
+                    _LOGGER.warning("query: timeout, attempt %d/%d", attempt + 1, self.MAX_RECONNECT_ATTEMPTS)
                     self._reset_port()
                 except Exception as exc:
-                    _LOGGER.error("query erreur: %s, tentative %d/%d", exc, attempt + 1, self.MAX_RECONNECT_ATTEMPTS)
+                    _LOGGER.error("query error: %s, attempt %d/%d", exc, attempt + 1, self.MAX_RECONNECT_ATTEMPTS)
                     self._consecutive_errors += 1
                     self._reset_port()
             
@@ -294,9 +294,25 @@ class SerialDevice:
         if self._consecutive_errors >= 3:
             return False
         if time.time() - self._last_successful_op > 60:
-            # Pas d'opération réussie depuis 60 secondes
+            # No successful operation for 60 seconds
             return False
         return True
+
+
+async def async_setup_entry(hass, entry, async_add_entities):
+    """Set up the Marantz RS232 media player from a config entry."""
+    config = entry.data
+    name = config.get(CONF_NAME)
+    port = config.get("serial_port")
+    baud = config.get("baudrate")
+    
+    # Defaults for UI config
+    command_map = {} 
+    optimistic = False
+    use_marantzusb_format = True
+    poll_interval = 10
+
+    await _async_common_setup(hass, name, port, baud, command_map, optimistic, use_marantzusb_format, poll_interval, async_add_entities)
 
 
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
@@ -305,7 +321,15 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
     port = config["serial_port"]
     baud = config.get("baudrate")
     command_map = config.get("command_map", {}) or {}
+    optimistic = config.get("optimistic", False)
+    use_marantzusb_format = config.get("use_marantzusb_format", False)
+    poll_interval = config.get("poll_interval", 10)
 
+    await _async_common_setup(hass, name, port, baud, command_map, optimistic, use_marantzusb_format, poll_interval, async_add_entities)
+
+
+async def _async_common_setup(hass, name, port, baud, command_map, optimistic, use_marantzusb_format, poll_interval, async_add_entities):
+    """Shared setup logic for YAML and Config Entry."""
     # If no command_map provided in configuration, try to load the parsed YAML
     if not command_map:
         try:
@@ -339,9 +363,6 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
     except Exception:
         parsed_yaml_path = None
 
-    optimistic = config.get("optimistic", False)
-    use_marantzusb_format = config.get("use_marantzusb_format", False)
-
     entity = MarantzRS6001(
         device,
         name,
@@ -363,29 +384,28 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
         _LOGGER.debug("Initial entity update failed (non-fatal)")
 
     # Setup periodic polling if requested
-    poll_interval = config.get("poll_interval", 10)
     try:
         if poll_interval and int(poll_interval) > 0:
             interval = timedelta(seconds=int(poll_interval))
 
             async def _async_poll(now):
                 try:
-                    # Vérifier si on doit sauter ce polling (commande utilisateur récente)
+                    # Check if we should skip this poll (recent user command)
                     if time.time() < entity._skip_poll_until:
                         _LOGGER.debug("Polling skipped: user command in progress")
                         return
                     
-                    # Vérifier la santé du port série
+                    # Check serial port health
                     if not device.is_healthy():
-                        _LOGGER.warning("Port série non sain, tentative de reset")
+                        _LOGGER.warning("Serial port unhealthy, attempting reset")
                         await hass.async_add_executor_job(device._reset_port)
                     
-                    # Polling avec timeout pour éviter les blocages
+                    # Polling with timeout to avoid blocking
                     try:
                         await asyncio.wait_for(entity.async_update(), timeout=8.0)
                     except asyncio.TimeoutError:
-                        _LOGGER.warning("Polling timeout après 8 secondes - le port série est peut-être bloqué")
-                        # Forcer un reset du port
+                        _LOGGER.warning("Polling timeout after 8 seconds - serial port might be blocked")
+                        # Force port reset
                         await hass.async_add_executor_job(device._reset_port)
                         return
                     
@@ -444,30 +464,30 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
 class MarantzRS6001(MediaPlayerEntity):
 
     async def async_mute_volume(self, mute: bool) -> None:
-        """Active ou désactive le mute sur l'ampli."""
+        """Enable or disable mute on the amplifier."""
         cmd = None
         if mute:
             cmd = self._cmd.get("mute_on")
         else:
             cmd = self._cmd.get("mute_off")
         if not cmd:
-            _LOGGER.warning("Aucune commande mute_on/mute_off définie dans command_map")
+            _LOGGER.warning("No mute_on/mute_off command defined in command_map")
             return
         await self._write_opportunistic(cmd)
-        # Mise à jour optimistic : affiche l'état mute immédiatement
+        # Optimistic update: show mute state immediately
         self._muted = mute
         self.async_write_ha_state()
 
     """Media player entity for a Marantz SR6001 (RS232).
 
-    This entity envoie les commandes définies dans `command_map`. Le mapping est
-    volontairement fourni par l'utilisateur car les chaînes RS232 exactes dépendent du firmware/format.
-    Voir le README pour des exemples et comment remplir la map.
+    This entity sends commands defined in `command_map`. The mapping is
+    intentionally provided by the user because exact RS232 strings depend on firmware/format.
+    See README for examples and how to populate the map.
     """
 
     @property
     def extra_state_attributes(self):
-        """Expose les attributs supplémentaires pour Home Assistant."""
+        """Expose extra attributes for Home Assistant."""
         attrs = {}
         db = self.volume_db
         if db is not None:
@@ -496,16 +516,16 @@ class MarantzRS6001(MediaPlayerEntity):
         # debounce interval in seconds for slider aggregation
         self._debounce_interval = 0.35
         
-        # Contrôle du polling : éviter de polluer pendant les commandes utilisateur
+        # Polling control: avoid polluting during user commands
         self._user_command_in_progress = False
         self._last_user_command_time = 0.0
-        self._skip_poll_until = 0.0  # Timestamp jusqu'auquel sauter le polling
-        # Flag pour indiquer qu'un update est en cours (évite les updates parallèles)
+        self._skip_poll_until = 0.0  # Timestamp until which to skip polling
+        # Flag to indicate an update is in progress (avoids parallel updates)
         self._update_in_progress = False
-        # Verrouillage du volume : après un changement utilisateur, on garde la valeur
-        # choisie pendant quelques secondes sans la remplacer par la lecture de l'ampli
+        # Volume lock: after a user change, keep the chosen value
+        # for a few seconds without replacing it with the amplifier reading
         self._volume_locked_until = 0.0
-        self._volume_lock_duration = 4.0  # secondes
+        self._volume_lock_duration = 4.0  # seconds
 
         # Build a set of supported MediaPlayerEntityFeature flags so that
         # membership checks like "MediaPlayerEntityFeature.GROUPING in self.supported_features"
@@ -559,7 +579,7 @@ class MarantzRS6001(MediaPlayerEntity):
 
     @property
     def volume_db(self):
-        """Retourne la valeur du volume en dB exacte renvoyée par l'ampli (si disponible)."""
+        """Return the exact volume dB value returned by the amplifier (if available)."""
         if hasattr(self, '_volume_db_exact') and self._volume_db_exact is not None:
             return self._volume_db_exact
         return None
@@ -716,21 +736,21 @@ class MarantzRS6001(MediaPlayerEntity):
         
         Returns True if the write was successful.
         """
-        # Marquer qu'une commande utilisateur est en cours
+        # Mark that a user command is in progress
         self._user_command_in_progress = True
         self._last_user_command_time = time.time()
-        # Retarder le prochain polling de 3 secondes
+        # Delay next polling by 3 seconds
         self._skip_poll_until = time.time() + 3.0
         
         success = False
         try:
-            # SerialDevice.write_raw gère son propre timeout et locking
+            # SerialDevice.write_raw handles its own timeout and locking
             result = await self.hass.async_add_executor_job(self._device.write_raw, cmd)
             success = result if isinstance(result, bool) else True
             if not success:
-                _LOGGER.warning("_write_opportunistic: échec de l'écriture de %s", cmd)
+                _LOGGER.warning("_write_opportunistic: failed to write %s", cmd)
         except Exception as exc:
-            _LOGGER.error("_write_opportunistic: erreur lors de l'écriture: %s", exc)
+            _LOGGER.error("_write_opportunistic: error writing: %s", exc)
             success = False
         finally:
             self._user_command_in_progress = False
@@ -759,7 +779,7 @@ class MarantzRS6001(MediaPlayerEntity):
             return
         volume = max(0.0, min(1.0, float(volume)))
         
-        # Marquer qu'une commande utilisateur est en cours
+        # Mark that a user command is in progress
         self._user_command_in_progress = True
         self._skip_poll_until = time.time() + 3.0
         
@@ -947,8 +967,8 @@ class MarantzRS6001(MediaPlayerEntity):
             return
         volume = max(0.0, min(1.0, float(volume)))
 
-        # Mise à jour immédiate de l'UI avec la valeur choisie
-        # et verrouillage pour éviter que le polling ne l'écrase
+        # Immediate UI update with chosen value
+        # and lock to prevent polling from overwriting it
         self._volume_level = volume
         self._volume_locked_until = time.time() + self._volume_lock_duration
         try:
@@ -977,14 +997,14 @@ class MarantzRS6001(MediaPlayerEntity):
         an asyncio lock here. We just use _update_in_progress to avoid
         parallel updates.
         """
-        # Vérifier si on doit sauter cet update (commande utilisateur récente)
+        # Check if we should skip this update (recent user command)
         if self._user_command_in_progress:
-            _LOGGER.debug("async_update: sauté car commande utilisateur en cours")
+            _LOGGER.debug("async_update: skipped because user command in progress")
             return
         
-        # Vérifier si un update est déjà en cours
+        # Check if an update is already in progress
         if self._update_in_progress:
-            _LOGGER.debug("async_update: sauté car update déjà en cours")
+            _LOGGER.debug("async_update: skipped because update already in progress")
             return
         
         self._update_in_progress = True
@@ -1034,13 +1054,13 @@ class MarantzRS6001(MediaPlayerEntity):
                             else:
                                 db = float(sval)
                             self._volume_db_exact = db
-                            # Ne mettre à jour le niveau que si le volume n'est pas verrouillé
+                            # Only update level if volume is not locked
                             if time.time() >= self._volume_locked_until:
                                 self._volume_level = (db - (-72.0)) / (15.0 - (-72.0))
                                 self._volume_level = max(0.0, min(1.0, self._volume_level))
                                 _LOGGER.debug("Parsed volume dB=%s -> level=%s", db, self._volume_level)
                             else:
-                                _LOGGER.debug("Volume verrouillé, valeur lue ignorée: dB=%s", db)
+                                _LOGGER.debug("Volume locked, read value ignored: dB=%s", db)
                         except Exception:
                             self._volume_db_exact = None
 
