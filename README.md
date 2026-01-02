@@ -20,10 +20,32 @@ This custom component integrates Marantz receivers (tested with SR6001) into Hom
 
 ## Installation
 
-1.  Copy the `marantz_rs232` folder to your Home Assistant `custom_components` directory.
-2.  Restart Home Assistant.
+### Option 1: Via HACS (Recommended)
+1.  Open HACS in Home Assistant.
+2.  Go to "Integrations" > Top right menu > "Custom repositories".
+3.  Add the URL of this repository.
+4.  Category: "Integration".
+5.  Click "Add" and then "Download".
+6.  Restart Home Assistant.
+
+### Option 2: Manual Installation
+1.  Download the `marantz_rs232` folder from this repository.
+2.  Copy it to your Home Assistant `custom_components` directory (e.g., `/config/custom_components/marantz_rs232`).
+3.  Restart Home Assistant.
 
 ## Configuration
+
+### Method 1: UI Configuration (Basic)
+After installation and restart:
+1.  Go to **Settings** > **Devices & Services**.
+2.  Click **Add Integration**.
+3.  Search for "Marantz RS232".
+4.  Enter your Serial Port (e.g., `/dev/ttyUSB0`), Baudrate, and Name.
+
+*Note: UI configuration uses default settings (`optimistic: false`, `use_marantzusb_format: true`).*
+
+### Method 2: YAML Configuration (Advanced)
+To customize advanced parameters like `optimistic` mode or `command_map`, use `configuration.yaml`. This works for both HACS and manual installations.
 
 Add the following to your `configuration.yaml`:
 
@@ -92,4 +114,4 @@ data:
       logs:
         custom_components.marantz_rs232: debug
     ```
--   **Serial Port**: Ensure the user running Home Assistant has permission to access the serial port (e.g., `dialout` group on Linux).
+-   **Serial Port**: Ensure the user running Home Assistant has permission to access the serial port.
